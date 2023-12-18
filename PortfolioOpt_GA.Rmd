@@ -1,0 +1,914 @@
+---
+title: "Portfolio Optimisation using GAs"
+author: "Charmaine Fernandes"
+date: "2023-02-19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Portfolio Optimisation using GAs
+
+## Part - 1
+
+### 1.1 Construction of a portfolio using the GA package
+
+#### 1.1.1 Asset Selection
+
+The assets chosen to build the portfolio for this section are assets of well-known companies from different sectors of industry.
+
+| #Company             | Ticker | Industry Sector                     |
+|----------------------|--------|-------------------------------------|
+| Google               | GOOGL  | Technology / Internet services      |
+| Amazon               | AMZN   | E-commerce / Retail                 |
+| Tesla                | TSLA   | Automotive / Energy / Technology    |
+| Snapchat (Snap Inc.) | SNAP   | Technology / Social media           |
+| NVIDIA               | NVDA   | Technology / Semiconductor          |
+| Meta (Facebook)      | META   | Technology / Social media           |
+| JPMorgan Chase       | JPM    | Financial services / Banking        |
+| Coca-Cola            | KO     | Consumer goods / Beverages          |
+| Pepsi                | PEP    | Consumer goods / Beverages / Snacks |
+| Ford                 | F      | Automotive                          |
+
+```{r Libraries, include=FALSE}
+library(quantmod)
+library(ggplot2)
+library(tidyquant) # To download the data
+library(plotly) # To create interactive charts
+library(timetk) # To manipulate the data series
+library(tidyr)  #To tidy messy data eg(spread()) 
+library(forcats) 
+library(GA)
+library(reshape2)
+library(gridExtra)
+library(kableExtra)
+library(tinytex)
+library(dplyr)
+library(nsga2R)
+library(mco)
+```
+
+#### 1.1.2 Asset Data Retrieval:
+
+Time period Train data (asset_data_train) -\> FY 2019 - 2020
+
+```{r Get Train Data, echo=TRUE, warning=FALSE}
+tick<-c("GOOGL", "AMZN" , "TSLA", "SNAP", "NVDA", "META", "JPM", "KO", "PEP", "F")
+
+asset_data_train <- tq_get(tick,
+                     from = '2019-04-01',
+                     to = '2020-03-31',
+                     get = 'stock.prices')
+
+asset_ret_train <- asset_data_train %>%
+  group_by(symbol) %>%
+  tq_transmute(select = adjusted,
+               mutate_fun = periodReturn,
+               period = 'weekly',
+               col_rename = 'ret',
+               type = 'log')
+
+asset_returns_train <- asset_ret_train  %>%
+  spread(symbol, value = ret) %>%
+  tk_xts()
+```
+
+#### 1.1.3 Fitness Function Employed
+
+For portfolio optimization the most useful **objective function is the Sharpe Ratio**, i.e the ratio of expected return to risk. If the Sharpe ratio is high it means the average return is higher than the variance, so the return is quite stable around the mean value. Our aim is to reach the highest stability of portfolio, not highest profit. We will build an objective function that maximizes the Sharpe Ratio.
+
+We define 3 functions that will help build our objective function and can be reused further : 1. Portfolio_returns( ) , 2 Sharpe ( ), 3. Constraint( ).
+
+##### 1.1.1.3.1 Define Functions : portfolio_returns(), sharpe() and constr()
+
+**Function Portfolio_returns( )** : *As we want to change weight values we define this function of an array x of weights that will return the sum of asset returns multiplied by related weights in time series.*
+
+```{r portfolio_return(x), echo=TRUE}
+portfolio_returns = function(x,asset_returns) {
+  port_returns = 0
+  # Multiplication of the i-th asset by the i-th weight in "x"
+  for (i in 1:length(x)) {
+    port_returns = port_returns + asset_returns[,i] * x[i]
+  }
+  return (port_returns)
+}
+```
+
+**Function sharpe( )** : *This function will calculate and return the Sharpe ratio on the historical weighted portfolios*
+
+```{r sharpe(x), echo=TRUE, message=FALSE, warning=FALSE}
+sharpe = function(x,asset_returns) {
+  port_returns = portfolio_returns(x, asset_returns)
+  return (mean(port_returns)/sqrt(var(port_returns)))
+}
+```
+
+**Function constr( )** : *The sum of weights of our portfolio generated should be 1 to cover invested capital. We will handle the cases of sum(weights) \> 1 or \< 1 in this function. Returning the boundary constraint calculated.*
+
+```{r Constr(x), echo=TRUE, message=FALSE, warning=FALSE}
+constr = function(x) {
+  constraint = (sum(x)-1)**2 
+  
+  for (i in 1:length(x)) {
+    constraint = constraint + 
+      max(c(0,x[i]-1))^2 +  # "x <= 1" constraint
+      max(c(0,-x[i]))^2     # "x >= 0" constraint
+  }
+   return (constraint)
+}
+```
+
+#### Fitness Function op_port(x):
+
+We want to build a fitness function that will maximize our Sharpe ratio, but we have a constraint that the sum of weights should be 1 to cover invested capital and our weights should be positive. hence we have our **penalty function constr()** , to penalize all portfolios generated that don't satisfy the constraint. Penalty function works only for minimization functions, hence we multiply Sharpe ratio by -1 and transform our maximization problem to minimization . To accelerate the global minimum search we multiply the penalty function by 100.
+
+```{r op_port(x), echo=TRUE, message=FALSE, warning=FALSE}
+op_port = function(x) {
+  return (-sharpe(x,asset_returns_train)+100*constr(x))
+}
+
+```
+
+#### GA Parameters
+
+```{r GA, echo=TRUE, message=FALSE, warning=FALSE}
+ga_result = ga(
+# Tell the genetic algorithm that the
+# weights are real variables
+type="real-valued",
+# "GA" function performs maximization, so we must multiply the objective function by -1 as we are minimizing negative Sharpe ratio as we applied the penalty function
+function(x){-op_port(x)},
+lower = rep(0,ncol(asset_returns_train)), # x_i >= 0
+upper = rep(1,ncol(asset_returns_train)), # x_i <= 1
+#maxiter = 1000,
+maxiter = 100
+run=100,
+popSize = 500,
+parallel=TRUE,
+monitor = FALSE,
+# Seed useful for replicating the results
+seed=1
+)
+
+```
+
+```{r ga_result summary, include=FALSE}
+summary(ga_result)
+```
+
+#### Optimal Portfolio evolved:
+
+```{r solution summary, echo=FALSE}
+# Store the resulting weights in a vector
+solution_op = as.vector(summary(ga_result)$solution)
+sum = sum(solution_op)
+
+sol_tab_op = data.frame( stock = c(names(asset_returns_train)),
+                      weight = round(solution_op,2))
+plot(ga_result)
+```
+
+```{r echo=FALSE, fig.width=8}
+Group = c("ECOM", "AUTO", "TECH", "FINANCE", "FMCG", "TECH", "TECH", "FMCG","TECH","AUTO")
+plot1 <- ggplot(sol_tab_op, aes(x=stock, y=weight, fill=Group)) +geom_bar(stat="identity") + labs(x="Stock", y="Weights in %") + theme_minimal() + scale_fill_manual(values=c("darkorange", "forestgreen", "red", "purple", "cyan", "yellow")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plot2 <- ggplot(sol_tab_op, aes(x="", y=weight, fill=stock)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  #scale_fill_brewer(palette="Dark2") +
+  labs(title="Portfolio Weights") +
+  theme(legend.position="right")+
+  geom_text(aes(label = weight), position = position_stack(vjust = 0.5))
+grid.arrange(plot1, plot2, ncol = 2)
+```
+
+```{r include=FALSE}
+optimal_returns = portfolio_returns(solution_op,asset_returns_train)
+colnames(optimal_returns) <- "Optimal"
+plot_port <- cbind(optimal_returns,asset_returns_train)
+plot_port_ret <- as.data.frame(plot_port)
+```
+
+```{r fig.height=7, include=FALSE}
+colnames(plot_port_ret)[2] <- "AMZN"
+# Create a new column for the date variable
+plot_port_ret$date <- as.Date(index(optimal_returns))
+
+```
+
+```{r include=FALSE}
+melted_data <- melt(plot_port_ret, id.vars = "date", variable.name = "symbol", value.name = "returns")
+```
+
+```{r echo=FALSE, fig.width=7}
+
+ggplot(data = melted_data, aes(x = date, y = returns, color = symbol)) +
+  geom_line() +
+  geom_line(data = filter(melted_data, symbol == "Optimal"), linewidth = 1, color = "black")+
+  labs(title = "Asset Returns", x = "Date", y = "Returns") +
+  scale_x_date(date_breaks = "1 months", date_labels = "%b %Y") + 
+  #scale_color_manual(values = symbol_colors, guide = FALSE) +
+  scale_color_discrete(name = "Symbol") +
+  ggtitle("Stock Performance") +
+  theme(axis.text.x = element_text(angle = 45))
+```
+
+#### Conclusion on optimal weights evolved:
+
+The weights generated for the optimal portfolio are positive and the optimal weights sum up to 1.002792, which when rounded up is 1. In the above plotted graph the **black line** which represents the returns of the optimal portfolio seems to be the most stable curve although not the best performing one compared to the the returns of individual assets.
+
+#### 
+
+#### Evaluation of the portfolio on unseen "future" data
+
+The optimal portfolio generated by our GA, we evaluate on data from FY April 2020-March 2021.
+
+```{r echo=TRUE, warning=FALSE}
+asset_data_test <- tq_get(tick,
+                      from = '2020-04-01',
+                      to = '2021-03-31',
+                      get = 'stock.prices')
+
+log_ret_test <- asset_data_test %>%
+  group_by(symbol) %>%
+  tq_transmute(select = adjusted,
+               mutate_fun = periodReturn,
+               period = 'weekly',
+               col_rename = 'ret',
+               type = 'log')
+asset_return_test <- log_ret_test %>%
+  spread(symbol, value = ret) %>%
+  tk_xts()
+```
+
+**Calculate mean return and covariance of test and train data**
+
+```{r echo=TRUE}
+#---mean/cov test data
+mean_ret_test <- colMeans(asset_return_test)
+cov_mat_test <- cov(asset_return_test) * 252
+#---mean/cov train data
+mean_ret_train <- colMeans(asset_returns_train)
+cov_mat_train <- cov(asset_returns_train) * 252
+```
+
+**Assign Optimal, balanced and random weights**
+
+```{r echo=TRUE}
+#weights for optimal portfolio (GA solution)
+wts_optimal <- solution_op
+#weights for banlanced portfolio
+wts_comp_bal<- c(rep(0.1,10))
+#weights for average of random portfolios
+wts_avg_ran_port <- c(0.208, 0.035, 0.048, 0.068, 0.079, 0.095, 0.227, 0.093, 0.082, 0.221)
+```
+
+**Calculate the Returns,risk and Sharpe ration for the optimal, balanced and random weights on Test and Train Data:**
+
+Using same logic as below for all -
+
+```{r echo=TRUE}
+#Optimal solution- Evolved portfolio - on future data 2020-2021 (Test Data)
+port_returns_op_tst <- (sum(wts_optimal * mean_ret_test) + 1)^252 - 1
+port_risk_op_tst <- sqrt(t(wts_optimal) %*% (cov_mat_test %*% wts_optimal))
+sharpe_ratio_op_tst <- port_returns_op_tst/port_risk_op_tst
+
+port_returns_train_op <- (sum(wts_optimal * mean_ret_train) + 1)^252 - 1
+port_risk_train_op <- sqrt(t(wts_optimal) %*% (cov_mat_train %*% wts_optimal))
+sharpe_ratio_train_op <- port_returns_train_op/port_risk_train_op
+```
+
+```{r include=FALSE}
+#------Train Data balanced portfolio
+port_returns_train_bal <- (sum(wts_comp_bal * mean_ret_train) + 1)^252 - 1
+port_risk_train_bal <- sqrt(t(wts_comp_bal) %*% (cov_mat_train %*% wts_comp_bal))
+sharpe_ratio_train_bal <- port_returns_train_bal/port_risk_train_bal
+
+#------Test Data balanced portfolio
+port_returns_tst_bal <- (sum(wts_comp_bal * mean_ret_test) + 1)^252 - 1
+port_risk_tst_bal <- sqrt(t(wts_comp_bal) %*% (cov_mat_test %*% wts_comp_bal))
+sharpe_ratio_tst_bal <- port_returns_tst_bal/port_risk_tst_bal
+
+```
+
+```{r include=FALSE}
+#------Train Data set of randomly generated portfolios
+port_returns_train_ran <- (sum(wts_avg_ran_port * mean_ret_train) + 1)^252 - 1
+port_risk_train_ran <- sqrt(t(wts_avg_ran_port) %*% (cov_mat_train %*% wts_avg_ran_port))
+sharpe_ratio_train_ran <- port_returns_train_ran/port_risk_train_ran
+#------Test Data balanced portfolio
+port_returns_tst_ran <- (sum(wts_avg_ran_port * mean_ret_test) + 1)^252 - 1
+port_risk_tst_ran <- sqrt(t(wts_avg_ran_port) %*% (cov_mat_test %*% wts_avg_ran_port))
+sharpe_ratio_tst_ran <- port_returns_tst_ran/port_risk_tst_ran
+
+```
+
+```{r include=FALSE}
+portfolio_test <- c( "Optimal", "Balanced", "Random")
+Return_test <- c( port_returns_op_tst,port_returns_tst_bal,port_returns_tst_ran)
+Risk_test = c( port_risk_op_tst,port_risk_tst_bal,port_risk_tst_ran) 
+portfolio_train <- c( "Optimal", "Balanced", "Random")
+Return_train <- c(port_returns_train_op,port_returns_train_bal,port_returns_train_ran)
+Risk_train <- c( port_risk_train_op, port_risk_train_bal, port_risk_train_ran)
+```
+
+**Portfolio performance on Test Data:**
+
+```{r echo=FALSE, fig.height=4}
+plot_df_test <- data.frame(Portfolio = portfolio_test,Return = Return_test, Risk = Risk_test)
+plot_df_test
+```
+
+**Portfolio performance on Train Data:**
+
+```{r echo=FALSE}
+# create data frame
+plot_df2_train <- data.frame( Portfolio = portfolio_train,Return = Return_train, Risk = Risk_train)
+plot_df2_train
+```
+
+The below plot shows the return : risk ratio of the different portfolios on the Train data i.e FY 2019-2020 and Test Data i.e FY 2020-2021
+
+**Balance weights** : The return and risk is quite **low** for both train and test.
+
+**Optimal weights** : The return is very high compared to the risk for the train data and for the test data the return is more compared to the risk.
+
+**Random weights** : The return is high but the risk is equally high for both test and train.
+
+```{r echo=FALSE, fig.width=8}
+#create ggplot scatter plot
+plot_test <- ggplot(plot_df_test, aes(x = Return, y = Risk, color = Portfolio)) +
+  geom_point(size=3) +
+  labs(title = "FY Apr 2020 - Mar 2021 (Test Data)", x = "Return", y = "Risk", color = "Portfolio") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+#create ggplot scatter plot
+plot_train <- ggplot(plot_df2_train, aes(x = Return, y = Risk, color = Portfolio)) +
+  geom_point(size=3) +
+  labs(title = "FY Apr 2019 - Mar 2020 (Train Data)", x = "Return", y = "Risk", color = "Portfolio") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+grid.arrange(plot_test, plot_train, ncol = 2)
+
+```
+
+#### Conclusion on comparing optimal/balanced/random weights with Train/Test data
+
+We can conclude that our GA has managed to generate an optimized portfolio that is stable although not the best with maxiter = 1000, the optimal portfolio shows a better performance where the return is high and the risk is low, and that the balanced and random portfolio show a low risk low return and high risk high return performance.
+
+### 1.2 Creation and evaluation of portfolios with differently balanced risk and return.
+
+We use the multi-objective approach to create portfolio, by as we have 2 objectives i.e Maximising returns, minimizing risk . We focus on only maximising the returns ignoring risk or we can focus on minimizing and ignore our returns.
+
+**Fitness Function for multi-objective approach of portfolio creation**
+
+We create a fitness function to calculate the mean return and the total risk of the portfolio, we use a parameter called the balancing factor **bal_fact** which will control the weight given to the mean return and the risk, the fitness is then calculated as a weighted sum of the two objectives. If **bal_fact** is close to 0, the optimization algorithm will prioritize risk reduction over return, and if **bal_fact** is close to 1, the optimization algorithm will prioritize maximizing return over risk reduction.
+
+```{r echo=TRUE}
+mul_fitness <- function(x, bal_fact){
+#fitness <- function(x){
+wts <- x
+  # Calculate the total returns
+  returns <- portfolio_returns(wts,asset_returns_train)
+  mean_return <- sum(returns) - 1e9 * (round(sum(wts),10)-1)^2 
+  mean_return <- bal_fact * mean_return
+  # Calculate the total risk
+  total_risk <- numeric()
+  for (i in 1:length(x)) {
+    relative_risk <- numeric()
+    
+    for (j in 1:length(x)) {
+      relative_risk[j] <- wts[i]*wts[j]*cov_mat_train[i,j]
+    }
+    total_risk[i] <- sum(relative_risk)
+  }
+  risk <- sum(total_risk) + 1e9 * (round(sum(wts),10)-1)^2
+  risk <- (1 - bal_fact) * risk
+  
+  # Calculate the number of assets
+  assets  <- length(wts[wts > 0])
+ 
+  fitness <- mean_return + risk
+
+  if (bal_fact == 0.5){
+   return(fitness,assets) 
+  }
+  
+  if (bal_fact < 0.5){
+  return(risk, assets)
+  }
+  
+  if (bal_fact > 0.5){
+  return(-mean_return, assets)
+  }
+  
+}
+
+# balance return and risk
+mul_obj_fun_bal<- function(x){
+  return_v <- mul_fitness(x, bal_fact = 0.5) 
+}
+
+#Maximise return ignoring risk
+mul_obj_fun_max_ret<- function(x){
+  return_v <- mul_fitness(x, bal_fact = 1)
+}
+
+#minimize risk ignoring return.
+mul_obj_fun_min_risk<- function(x){
+  mul_fitness(x, bal_fact = 0)
+}
+```
+
+We use the **nsga2r()** which is a non-dominated sorting genetic algorithm which is a useful technique in multi-objective optimization as it allows for the identification of the best trade-off solutions among a set of candidate solutions, which can be particularly valuable in decision-making scenarios where multiple objectives need to be considered.
+
+**nsga2R Parameters**
+
+We call the nsga2R() 3 times separately passing our objective functions-\>mul_obj_fun_bal(), mul_obj_fun_max_ret(), mul_obj_fun_min_risk() and the below parameters.
+
+*nsga2R(fn = mul_obj_fun_bal,*
+
+*varNo = ncol(asset_returns_train),*
+
+*objDim = 2, #we have 2 returning parameters*
+
+*generations = 500, mprob = 0.2, popSize = 50, cprob = 0.8,*
+
+*lowerBounds = rep(0, ncol(asset_returns_train)),*
+
+*upperBounds = rep(1, ncol(asset_returns_train)))*
+
+```{r include=FALSE}
+#GA to balance risk and ratio
+mul_sol_bal<-nsga2R(fn = mul_obj_fun_bal, 
+                varNo = ncol(asset_returns_train), 
+                objDim = 2, #we have 3 returning parameters
+                generations = 500, mprob = 0.2, popSize = 50, cprob = 0.8,
+                lowerBounds = rep(0, ncol(asset_returns_train)),
+                upperBounds = rep(1, ncol(asset_returns_train)))
+```
+
+```{r include=FALSE}
+#Maximise return ignore risk
+mul_sol_max_ret<-nsga2R(fn = mul_obj_fun_max_ret, 
+                varNo = ncol(asset_returns_train), 
+                objDim = 2, #we have 3 returning parameters
+                generations = 500, mprob = 0.2, popSize = 50, cprob = 0.8,
+                lowerBounds = rep(0, ncol(asset_returns_train)),
+                upperBounds = rep(1, ncol(asset_returns_train)))
+```
+
+```{r include=FALSE}
+#Maximise return ignore risk
+mul_sol_min_risk<-nsga2R(fn = mul_obj_fun_min_risk, 
+                varNo = ncol(asset_returns_train), 
+                objDim = 2, #we have 3 returning parameters
+                generations = 500, mprob = 0.2, popSize = 50, cprob = 0.8,
+                lowerBounds = rep(0, ncol(asset_returns_train)),
+                upperBounds = rep(1, ncol(asset_returns_train)))
+```
+
+**GA generates 3 portfolios as per our GA function as plotted below:**
+
+```{r echo=FALSE, fig.height=3, fig.width=9}
+mul_sol_weights_bal<-data.frame(stock = c(unique(asset_data_train$symbol)),
+           weight = mul_sol_bal$parameters[1, ]) 
+plot_mulob_bal <- ggplot(mul_sol_weights_bal, aes(x="", y=weight, fill=stock)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  #scale_fill_brewer(palette="Dark2") +
+  labs(title="Stock Portfolio Weights balancing risk and return") +
+  theme(legend.position="none",
+        plot.title = element_text(size = 8))
+ #geom_text(aes(label = round(weight,3)), position = position_stack(vjust = 0.5))
+
+mul_sol_weights_max_ret<-data.frame(stock = c(unique(asset_data_train$symbol)),
+           weight = mul_sol_max_ret$parameters[1, ]) 
+plot_mulob_max_ret <- ggplot(mul_sol_weights_max_ret, aes(x="", y=weight, fill=stock)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  #scale_fill_brewer(palette="Dark2") +
+  labs(title="Stock Portfolio Weights maximizing return ignore risk") +
+  theme(legend.position="none",
+        plot.title = element_text(size = 8))
+
+mul_sol_weights_min_risk<-data.frame(stock = c(unique(asset_data_train$symbol)),
+           weight = mul_sol_min_risk$parameters[1, ]) 
+plot_mulob_min_risk <- ggplot(mul_sol_weights_min_risk, aes(x="", y=weight, fill=stock)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  #scale_fill_brewer(palette="Dark2") +
+  labs(title="Stock Portfolio Weights minimizing risk ignore return") +
+  theme(legend.position="right",
+        plot.title = element_text(size = 8))
+ #geom_text(aes(label = round(weight,3)), position = position_stack(vjust = 0.5))
+
+grid.arrange(plot_mulob_bal, plot_mulob_max_ret,plot_mulob_min_risk, ncol = 3)
+```
+
+The sum of the weights for the above GA for Generation = 500 and population size = 50 give the below weights for **Balance risk-return, Max Return, Min Risk**
+
+```{r echo=FALSE, fig.width=8}
+assets_mul_ob <- c(mul_sol_weights_bal$stock)
+wts_bal_risk_ret <- c(mul_sol_weights_bal$weight)
+wts_max_ret <- c(mul_sol_weights_max_ret$weight)
+wts_min_risk <- c(mul_sol_weights_min_risk$weight)
+Weights_mulob <- data.frame( stock = assets_mul_ob,
+                             bal_risk_ret = round(wts_bal_risk_ret,4),
+                             max_ret = round(wts_max_ret,4),
+                             min_risk = round(wts_min_risk,4))
+Weights_mulob
+```
+
+```{r include=FALSE}
+#Evolved portfolio - Balanced risk and return
+port_returns_tst_bal_retrisk <- (sum(wts_bal_risk_ret * mean_ret_test) + 1)^252 - 1
+port_risk_tst_bal_retrisk <- sqrt(t(wts_bal_risk_ret) %*% (cov_mat_test %*% wts_bal_risk_ret))
+sharpe_ratio_tst_bal_retrisk <- port_returns_tst_bal_retrisk/port_risk_tst_bal_retrisk
+
+port_returns_train_bal_retrisk <- (sum(wts_bal_risk_ret * mean_ret_train) + 1)^252 - 1
+port_risk_train_bal_retrisk <- sqrt(t(wts_bal_risk_ret) %*% (cov_mat_train %*% wts_bal_risk_ret))
+sharpe_ratio_train_bal_retrisk <- port_returns_train_bal_retrisk/port_risk_train_bal_retrisk
+```
+
+```{r include=FALSE}
+#------Train Data maximum return ignore risk portfolio
+port_returns_train_max_ret <- (sum(wts_max_ret * mean_ret_train) + 1)^252 - 1
+port_risk_train_max_ret <- sqrt(t(wts_max_ret) %*% (cov_mat_train %*% wts_max_ret))
+sharpe_ratio_train_max_ret <- port_returns_train_max_ret/port_risk_train_max_ret
+
+#------Test Data maximum return ignore risk portfolio
+port_returns_tst_max_ret <- (sum(wts_max_ret * mean_ret_test) + 1)^252 - 1
+port_risk_tst_max_ret <- sqrt(t(wts_max_ret) %*% (cov_mat_test %*% wts_max_ret))
+sharpe_ratio_tst_max_ret <- port_returns_tst_max_ret/port_risk_tst_max_ret
+
+```
+
+```{r include=FALSE}
+#------Train Data set of minimum risk ignore return portfolios
+port_returns_train_min_risk <- (sum(wts_min_risk * mean_ret_train) + 1)^252 - 1
+port_risk_train_min_risk <- sqrt(t(wts_min_risk) %*% (cov_mat_train %*% wts_min_risk))
+sharpe_ratio_train_min_risk <- port_returns_train_min_risk/port_risk_train_min_risk
+#------Test Data minimum risk ignore return portfolios
+port_returns_tst_min_risk<- (sum(wts_min_risk * mean_ret_test) + 1)^252 - 1
+port_risk_tst_min_risk <- sqrt(t(wts_min_risk) %*% (cov_mat_test %*% wts_min_risk))
+sharpe_ratio_tst_min_risk <- port_returns_tst_min_risk/port_risk_tst_min_risk
+
+```
+
+```{r include=FALSE}
+portfolio_test_mulob <- c( "Balanced", "Max Return", "Min Risk")
+Return_test_mulob <- c( port_returns_tst_bal_retrisk,port_returns_tst_max_ret,port_returns_tst_min_risk)
+Risk_test_mulob = c( port_risk_tst_bal_retrisk,port_risk_tst_max_ret,port_risk_tst_min_risk) 
+portfolio_train_mulob <- c( "Balanced", "Max Return", "Min Risk")
+Return_train_mulob <- c(port_returns_train_bal_retrisk,port_returns_train_max_ret,port_returns_train_min_risk)
+Risk_train_mulob <- c( port_risk_train_bal_retrisk, port_risk_train_max_ret, port_risk_train_min_risk)
+```
+
+**Test Data: FY Apr 2020-Mar 2021**
+
+```{r echo=FALSE}
+plot_df_test_mulob <- data.frame(Portfolio = portfolio_test_mulob,Return = Return_test_mulob, Risk = Risk_test_mulob)
+plot_df_test_mulob
+```
+
+**Train Data: FY Apr2019-Mar2020**
+
+```{r echo=FALSE}
+plot_df_train_mulob <- data.frame(Portfolio = portfolio_train_mulob,Return = Return_train_mulob, Risk = Risk_train_mulob)
+plot_df_train_mulob
+```
+
+**Graph Plot: Compare the weights on Test and Train data.**
+
+```{r echo=FALSE, fig.width=8}
+#create ggplot scatter plot
+plot_test_mulob <- ggplot(plot_df_test_mulob, aes(x = Return, y = Risk, color = Portfolio)) +
+  geom_point(size=3) +
+  labs(title = "FY Apr 2020 - Mar 2021 (Test Data)", x = "Return", y = "Risk", color = "Portfolio") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+#create ggplot scatter plot
+plot_train_mulob <- ggplot(plot_df_train_mulob, aes(x = Return, y = Risk, color = Portfolio)) +
+  geom_point(size=3) +
+  labs(title = "FY Apr 2019 - Mar 2020 (Train Data)", x = "Return", y = "Risk", color = "Portfolio") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+grid.arrange(plot_test_mulob, plot_train_mulob, ncol = 2)
+```
+
+## Part - 2
+
+### 2.1 Using GA to select the assets
+
+We use the initially defined functions portfolio_returns(), sharpe() and constr() defined under title **1.1.1.3.1 Define Functions** , to build our objective function(fitness function) that will select 10 best assets out of a pool of 100 assets, that we have retrieved from GetSP500Stocks()
+
+```{r echo=TRUE, warning=FALSE}
+library(BatchGetSymbols)
+
+df.SP500 <- GetSP500Stocks()
+tickers <- df.SP500$Tickers[1:100]
+
+
+data_pool <- BatchGetSymbols(tickers = tickers,
+                         first.date = '2019-04-01',
+                         last.date = '2020-03-31',
+                         be.quiet = TRUE)
+
+ret_train <- data_pool$df.tickers %>%
+  group_by(ticker) %>%
+  tq_transmute(select = price.adjusted,
+               mutate_fun = periodReturn,
+               period = 'weekly',
+               col_rename = 'ret',
+               type = 'log')
+
+asset_returns_train2 <- ret_train %>%
+  spread(ticker, value = ret) %>%
+  tk_xts()
+```
+
+**Objective Function for GA to pick 10 best stocks**
+
+For the fitness function we want our sharpe ratio to be greater than or equal to 1 and the sum of weights to be equal to 1 (i.e handled by constr()). We will use the knapsack logic and apply binary GA.
+
+```{r echo=TRUE}
+obj = function(x) {
+  if ( sharpe(x,asset_returns_train2)+100*constr(x) < 1 ) 
+  {
+    return(0)
+  }
+  else
+  {
+    return (sharpe(x,asset_returns_train2)) 
+  }
+}
+```
+
+**GA Parameters**
+
+We need our GA to generate a portfolio of 10 best assets hence we create our own functions that will select the 10 best out of the n assets. Functions for the GA parameters population, crossover and mutation.
+
+```{r echo=TRUE}
+#population
+myInit <- function(k){
+  
+  function(GA){
+    m <- matrix(0, ncol = GA@nBits, nrow = GA@popSize)
+    
+    for(i in seq_len(GA@popSize))
+      m[i, sample(GA@nBits, k)] <- 1 
+    
+    m
+  }
+}
+
+#Crossover 
+myCrossover <- function(GA, parents){
+  
+  parents <- GA@population[parents,] %>%
+    apply(1, function(x) which(x == 1)) %>%
+    t()
+  
+  parents_diff <- list("vector", 2)
+  parents_diff[[1]] <- setdiff(parents[2,], parents[1,])
+  parents_diff[[2]] <- setdiff(parents[1,], parents[2,])
+  
+  children_ind <- list("vector", 2)
+  for(i in 1:2){
+    k <- length(parents_diff[[i]])
+    change_k <- sample(k, sample(ceiling(k/2), 1))
+    children_ind[[i]] <- if(length(change_k) > 0){
+      c(parents[i, -change_k], parents_diff[[i]][change_k])
+    } else {
+      parents[i,]
+    }
+  }
+  
+  children <- matrix(0, nrow = 2, ncol = GA@nBits)
+  for(i in 1:2)
+    children[i, children_ind[[i]]] <- 1
+  
+  list(children = children, fitness = c(NA, NA))
+}
+
+#Mutation
+myMutation <- function(GA, parent){
+  
+  ind <- which(GA@population[parent,] == 1) 
+  n_change <- sample(3, 1)
+  ind[sample(length(ind), n_change)] <- sample(setdiff(seq_len(GA@nBits), ind), n_change)
+  parent <- integer(GA@nBits)
+  parent[ind] <- 1
+  
+  parent
+}
+
+#name of weights
+col_name <- colnames(asset_returns_train2)
+```
+
+```{r echo=TRUE}
+
+GA=ga( type='binary', #GA will use binary encoding for the decision variables
+      #obj(x) is the objective function that is being optimized
+      fitness=function(x){obj(x)},
+      #Specifies the number of bits for each binary decision variable, which is          equal to the number of assets.
+      nBits=ncol(asset_returns_train2),
+      #Specifies the names of the decision variables - Assets
+      names=col_name,
+      #myInit(10): Specifies the initial population of solutions, which is               generated using the myInit function with a population size of 10.
+      population = myInit(10),
+      #Crosover specifies the crossover function used to generate new solutions          from the existing population. Here, myCrossover is the custom crossover            function defined.
+      crossover = myCrossover,
+      #mutation = myMutation: Specifies the mutation function used to introduce          random variations in the solutions. Here, myMutation is the custom mutation        function defined.
+      mutation = myMutation,
+      #pmutation = 0.3: Specifies the probability of mutation for each decision          variable in a given solution.30% chance that a given decision variable in a        solution will be mutated in each generation. 
+      pmutation = 0.3,
+      #maximun 500 generations to run
+      #maxiter=500,
+      maxiter = 100,
+      #100 number of solutions in each generation of the GA.
+      popSize=100,
+      seed=1,
+      #keep the best solution from the previous generation in the next generation.       As we want to carry forward our best asset
+      keepBest=TRUE,
+      # Not print out information for each generation
+      monitor=FALSE)
+
+```
+
+```{r echo=FALSE}
+best_asset = col_name[GA@solution[1,]==1]
+cat("Best 10 assets selected by GA:",best_asset, sep = " ")
+```
+
+**Mean return & Covariance matrix of the selected 10 assets:**
+
+```{r echo=TRUE}
+best_asset_return_train <- asset_returns_train2[,names(asset_returns_train2) %in% best_asset]
+mean_ret_best_train <- colMeans(best_asset_return_train)
+cov_mat_best_train <- cov(best_asset_return_train) * 252
+```
+
+**Fitness function to generate an optimal portfolio using the selected assets:**
+
+```{r echo=TRUE}
+best_op_obj = function(x) {
+  # We want the maximum Sharpe ratio, so we multiply it by
+  # -1 to fit an optimization problem
+  
+  return (-sharpe(x,best_asset_return_train)+100*constr(x))
+}
+
+```
+
+**GA function for optimized portfolio for the 10 selected assets.**
+
+```{r echo=TRUE}
+ga_res_best = ga(
+  # Tell the genetic algorithm that the 
+  # weights are real variables
+  type="real-valued", 
+  
+  # "ga" function performs maximization, so we must
+  # multiply the objective function by -1
+  function(x){-best_op_obj(x)}, 
+  
+  # x_i >= 0
+  lower = rep(0,ncol(best_asset_return_train)), 
+  
+  # x_i <= 1
+  upper = rep(1,ncol(best_asset_return_train)), 
+  
+  # Maximum number of iterations 
+  #maxiter = 500, 
+  maxiter = 100,
+  # If the maximum fitness remains the same for 50
+  # consecutive transactions, stop the algorithm
+  run=100, 
+  
+  #populatio size 
+  popSize = 500,
+  
+  # Exploit multi-core properties of your CPU
+  parallel=TRUE,
+  
+  # We want to see the partial results of the process
+  # while it performs
+  monitor=FALSE,
+  
+  # Seed useful for replicating the results
+  seed=1
+)
+```
+
+Graph plot of GA result:
+
+```{r echo=FALSE}
+solution_best = as.vector(summary(ga_res_best)$solution)
+sol_tab_best = data.frame( stock = c(names(best_asset_return_train)),
+                      weight = round(solution_best,2))
+plot(ga_res_best)
+```
+
+**Pie Chart of optimal weight distribution of the 10 best assets:**
+
+```{r echo=FALSE}
+#ggplot(sol_tab_best, aes(x=stock, y=weight)) +geom_bar(stat="identity") + labs(x="Stock", y="Weights in %") + theme_minimal()  + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plot_best_port <- ggplot(sol_tab_best, aes(x="", y=weight, fill=stock)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  #scale_fill_brewer(palette="Dark2") +
+  labs(title="Stock Portfolio Weights") +
+  theme(legend.position="right")+
+  geom_text(aes(label = weight), position = position_stack(vjust = 0.5))
+
+plot_best_port
+
+```
+
+**Evaluation of generated optimal weights on Test and train data:**
+
+We get the test data for the Year 2020-2021 as our Train data was Year 2019-2021.
+
+```{r echo=TRUE}
+best_data_test <- tq_get(best_asset,
+                      from = '2020-01-01',
+                      to = '2021-01-31',
+                      get = 'stock.prices')
+best_ret_tidy_test <- best_data_test %>%
+  group_by(symbol) %>%
+  tq_transmute(select = adjusted,
+               mutate_fun = periodReturn,
+               period = 'weekly',
+               col_rename = 'ret',
+               type = 'log')
+best_asset_return_test <- best_ret_tidy_test %>%
+  spread(symbol, value = ret) %>%
+  tk_xts()
+#---mean/cov test data
+mean_ret_best_test <- colMeans(best_asset_return_test)
+cov_mat_best_test <- cov(best_asset_return_test) * 252
+
+
+```
+
+```{r include=FALSE}
+wts_best <- solution_best
+port_returns_best_test <- (sum(wts_best * mean_ret_best_test) + 1)^252 - 1
+port_risk_best_test <- sqrt(t(wts_best) %*% (cov_mat_best_test %*% wts_best))
+sharpe_ratio_best_test <- port_returns_best_test/port_risk_best_test
+
+port_returns_best_train <- (sum(wts_best * mean_ret_best_train) + 1)^252 - 1
+port_risk_best_train <- sqrt(t(wts_best) %*% (cov_mat_best_train %*% wts_best))
+sharpe_ratio_best_train <- port_returns_best_train/port_risk_best_train
+
+portfolio_best <- c( "Test", "Train")
+portfolio_return_best <- c(port_returns_best_test,port_returns_best_train)
+portfolio_risk_best <- c(port_risk_best_test,port_risk_best_train)
+
+data_best <- data.frame(Portfolio = portfolio_best,Return = portfolio_return_best,Risk = portfolio_risk_best)
+```
+
+```{r echo=FALSE}
+plot_best_po <- ggplot(data_best, aes(x = Return, y = Risk, color = Portfolio)) +
+  geom_point(size=3) +
+  labs(title = "Performance of best 10 assets", x = "Return", y = "Risk", color = "Portfolio") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+plot_best_po
+```
+
+**Conclusion for generated Optimal portfolio using the 10 best assets selected by our GA:**
+
+The generated weights perform well on the train data with high returns and low risk but its not the same case for the year 2020-2021 the returns are really low and risk comparatively very high.
+
+References: \* Deb, K., Pratap, A., Agarwal, S., & Meyarivan, T. (2002). A fast and elitist multiobjective genetic algorithm: NSGA-II. IEEE transactions on evolutionary computation, 6(2), 182-197.\
+
+-   <http://www.iitk.ac.in/kangal/codes/nsga2/index.htm>
+
+\* Xie, Y. (2021). TinyTeX: A lightweight, cross-platform, and easy-to-maintain LaTeX distribution based on TeX Live. The Journal of Open Source Software, 6(61), 3012.\
+
+-   <https://yihui.org/tinytex/>\
+
+\* Wickham, H. (2016). ggplot2: Elegant graphics for data analysis. Springer-Verlag New York. \
+
+-   <https://ggplot2.tidyverse.org/>
+
+<https://rstudio-pubs-static.s3.amazonaws.com/364194_96fa6ffa96d84b4ea95e831592214b97.html>
+
+<https://www.codingfinance.com/post/2018-05-31-portfolio-opt-in-r/>\
+- <https://rmarkdown.rstudio.com/>
