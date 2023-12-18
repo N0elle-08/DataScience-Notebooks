@@ -1,0 +1,557 @@
+---
+title: "Algorithmic Trading Assignment"
+author: "Charmaine Fernandes"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+---
+
+
+ 
+# Introduction
+
+This report uses the approach of Price prediction-based trading. First a model is built to predict the prices for the coming day.
+Using the prediction a trading rule is built which chooses to buy/sell/hold based on the current and predicted values.
+We then back-test the built trading rule on historical data. Referencing to paper[1] [2] , I have chosen to explore the above mentioned approach, to build a trading rule that uses Gap fill Trading strategy referencing different blogs and papers mentioned in #references.
+
+## Data Collection:
+### Asset - AAPL, period 2020-01 - 2021-12
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(quantmod)
+library(dplyr)
+library(TTR)
+library(neuralnet)
+library(xts)
+set.seed('101')
+```
+
+
+```{r}
+ticker <- "AAPL"
+start <- as.Date("2020-01-01")
+end <- as.Date("2021-12-31")
+
+
+```
+```{r}
+
+data <- getSymbols(Symbols = ticker, src = "yahoo", from = start, to = end,
+                   period = "daily")
+data_xts <- xts(AAPL, order.by = index(AAPL))
+#chartSeries(data_xts, type="candlesticks")
+gdatfr <- data.frame(date=index(AAPL), coredata(AAPL)) 
+
+price_data_high <- gdatfr$AAPL.High
+price_data_low <- gdatfr$AAPL.Low
+price_data_open <- gdatfr$AAPL.Open
+price_data_close <- gdatfr$AAPL.Close
+rows <- nrow(gdatfr)
+
+```
+# Feature Selection & Data preprocessing
+
+
+
+In the case of time series prediction, both input and target values are drawn 
+from the same series. Which means that we use the sliding window of size j, where j is the number of values we use to predict (j+1)-th value.
+
+
+Function create_train_test() we scaled the data, then lag the data as we are 
+working on timeseries data using a lagorder of 10 days, remove all NA and
+missing values and split the data into train and test
+Feature Selection:Select the most relevant features that can help predict
+the price movement of the asset
+create formula for our model that predicts prices for
+scx1 using variables scx2 to scx10
+
+```{r}
+ 
+create_train_test <- function(price_data, lag_order, train_size, n) {
+   scaled_price <- scale(price_data)
+  
+  # Create a lagged version of the scaled price variable
+  scx <- matrix(NA, nrow = n, ncol = lag_order)
+  
+  for (i in 1:lag_order) {
+    scx[, i] <- lag(scaled_price, i)
+  }
+  
+  # Rename the lagged variables
+  scx_price <- as.data.frame(na.omit(scx))
+  colnames(scx_price) <- paste0("scx", 1:lag_order)
+  
+  # Split the data into train and test sets
+  scaled_train <- scx_price[1:train_size, ]
+  scaled_test <- scx_price[(train_size + 1):nrow(scx_price), ]
+  col_name <- names(scx_price)
+  f <- as.formula(paste("scx1 ~", paste(col_name[!col_name %in% "scx1"],
+                                        collapse = " + ")))
+
+  return(list(scaled_train = scaled_train, scaled_test = scaled_test,
+              formula = f, scprice = scx_price))
+  
+}
+
+```
+## Neural Network Training: 
+
+
+
+First model was built using Gramevol() to predict the values using RMSE as the fitness value the result and value of RMSE was too high, later implemented Neuralnet with 3 hidden layers consisting of 5,3 and 2 neurons each layer respectively with a threshold value of 0.01, and stepmax = 1e+05, when the train size data of 200.
+
+Train a neural network on the selected features using a 
+supervised learning algorithm. The neural network is designed to
+predict whether the price will fill the gap or not. 
+Function model_predict() builds the model using neuralnet to predict
+data for the next day using previous day data
+```{r}
+
+model_predict <-function(form, scaled_train, scaled_test){
+  scop.nn <- neuralnet(form, scaled_train, hidden=c(5,3,2),threshold = 0.1,
+                       stepmax = 1e+05,linear.output = TRUE)
+  scop.output = predict(scop.nn, scaled_test)
+  return(list(objnn = scop.nn, scpredictedval = scop.output))
+}
+
+
+get_rescaled_val <- function(price_data, scaled_test, scaled_predicted_vals){
+  actuals <- scaled_test * sd(price_data) + mean(price_data)
+  predicted <- scaled_predicted_vals * sd(price_data) + mean(price_data)
+  return(list(actualvals = actuals, predictvals = predicted))
+}
+
+
+
+
+```
+We get predicted values  of high, low, open and close separately calling 
+the above functions respectively for coming days data by lagging the data by
+10 days to build our trading rule and calculate RMSE to
+check accuracy of predicted data test data
+
+```{r message=FALSE, warning=FALSE , echo=TRUE}
+
+#predict high values
+train_size = 200
+lag_order = 10
+
+
+train_test_data_high <- create_train_test(price_data_high, lag_order,
+                                          train_size, rows)
+scaled_train_high <- train_test_data_high$scaled_train
+scaled_test_high <- train_test_data_high$scaled_test
+form_high <- train_test_data_high$formula
+
+
+obj_high_nn <- model_predict(form_high, scaled_train_high, scaled_test_high)
+obj_high <- obj_high_nn$objnn
+#print(obj_high$result.matrix)
+high_scpredict <- obj_high_nn$scpredictedval
+
+
+rescaled_high <- get_rescaled_val(price_data_high, scaled_test_high$scx1,
+                                  high_scpredict)
+rescaled_price <- get_rescaled_val(price_data_high,
+                                   train_test_data_high$scprice,
+                                   high_scpredict)
+
+error_high <- rescaled_high$predictvals - rescaled_high$actualvals
+RMSE_high <- sqrt(mean((rescaled_high$predictvals
+                        - rescaled_high$actualvals)^2))
+
+#predict low values
+train_test_data_low <- create_train_test(price_data_low,
+                                         lag_order, train_size, rows)
+scaled_train_low <- train_test_data_low$scaled_train
+scaled_test_low <- train_test_data_low$scaled_test
+form_low <- train_test_data_low$formula
+
+
+obj_low_nn <- model_predict(form_low, scaled_train_low, scaled_test_low)
+obj_low <- obj_low_nn$objnn
+low_scpredict <- obj_low_nn$scpredictedval
+
+
+rescaled_low <- get_rescaled_val(price_data_low,
+                                 scaled_test_low$scx1, low_scpredict)
+
+error_low <- rescaled_low$predictvals - rescaled_low$actualvals
+RMSE_low <- sqrt(mean((rescaled_low$predictvals -
+                         rescaled_low$actualvals)^2))
+
+
+#predict open values
+train_test_data_open <- create_train_test(price_data_open,
+                                          lag_order, train_size, rows)
+scaled_train_open <- train_test_data_open$scaled_train
+scaled_test_open <- train_test_data_open$scaled_test
+form_open <- train_test_data_open$formula
+
+
+obj_open_nn <- model_predict(form_open, scaled_train_open,
+                             scaled_test_open)
+obj_open <- obj_open_nn$objnn
+open_scpredict <- obj_open_nn$scpredictedval
+
+
+rescaled_open <- get_rescaled_val(price_data_open,
+                                  scaled_test_open$scx1, open_scpredict)
+
+error_open <- rescaled_open$predictvals - rescaled_open$actualvals
+RMSE_open <- sqrt(mean((rescaled_open$predictvals
+                        - rescaled_open$actualvals)^2))
+
+#predict close values
+train_test_data_close <- create_train_test(price_data_close,
+                                           lag_order, train_size, rows)
+scaled_train_close <- train_test_data_close$scaled_train
+scaled_test_close <- train_test_data_close$scaled_test
+form_close <- train_test_data_close$formula
+
+
+obj_close_nn <- model_predict(form_close, scaled_train_close,
+                              scaled_test_close)
+obj_close <- obj_close_nn$objnn
+close_scpredict <- obj_close_nn$scpredictedval
+
+
+rescaled_close <- get_rescaled_val(price_data_close,
+                                   scaled_test_close$scx1, close_scpredict)
+
+error_close <- rescaled_close$predictvals - rescaled_close$actualvals
+RMSE_close <- sqrt(mean((rescaled_close$predictvals
+                         - rescaled_close$actualvals)^2))
+
+rows_strt <- train_size + 1
+rows_end <- rows_strt + (nrow(scaled_test_close)-1)
+
+
+
+```
+```{r echo=FALSE}
+plot(obj_high)
+```
+
+
+```{r echo=FALSE}
+plot(obj_close)
+```
+
+
+```{r echo=FALSE}
+plot(obj_low)
+```
+
+
+```{r echo=FALSE}
+plot(obj_open)
+```
+
+
+#  Gap Fill Strategy (only Gap Down) 
+
+There isn't a specific person who can be credited with creating the gap fill trading strategy, as it's a relatively common technique used by traders in the financial markets. Traders have been using price gaps as trading signals for many years, and the gap fill strategy is simply an extension of this approach.
+The gap fill strategy is based on the idea that price gaps tend to be filled over time, as the market moves towards a state of equilibrium. When there is a sudden change in market conditions, such as a news event or a change in market sentiment, it can cause a price gap to form. However, over time, the market tends to reprice the asset, and the price gap is eventually filled.
+Traders have recognized the potential for profit in trading price gaps and have developed various strategies to take advantage of these opportunities. The gap fill strategy is just one of these approaches, and it involves taking a position in an asset when the price starts to fill a gap.
+
+## Using the predicted values we formulate the above trading rule and try it on our test data
+
+
+
+```{r}
+
+
+##
+actual_close <- rescaled_close$actualvals
+predicted_close <- round(rescaled_close$predictvals,2)
+actual_high <- rescaled_high$actualvals
+predicted_high <- round(rescaled_high$predictvals,2)
+actual_low <- rescaled_low$actualvals
+predicted_low <- round(rescaled_low$predictvals,2)
+actual_open <- rescaled_open$actualvals
+predicted_open <- round(rescaled_open$predictvals,2)
+
+
+```
+# The below code checks the conditions accordingly triggers the buy signal for that day.
+  Conditions:
+  if predicted open for the day is less than the actual close of the previous day 
+  and if the predicted low of the day is less than the predicted open of the day
+  and if the predicted high of the day is greater than the actual close of the previous day
+  AND if the predicted high of the day is greater than the actual open of the day
+  then we will BUY the shares at the value of the actual open of that day for that day else we hold
+```{r}
+
+sampleData <- data.frame(actual_close,predicted_close,actual_high,
+                         predicted_high,actual_low,predicted_low,
+                         actual_open,predicted_open)
+
+decision <- c( )
+buy_value <-c()
+
+#chartSeries(data_xts[rows_strt:rows_end], type="candlesticks")
+
+for(i in 2:nrow(sampleData)){
+  if (sampleData$predicted_open[i] < sampleData$actual_close[i - 1] &&
+      sampleData$predicted_low[i] < sampleData$predicted_open[i] &&
+      sampleData$predicted_high[i] > sampleData$actual_close[i - 1] &&
+      sampleData$predicted_open[i] > sampleData$actual_open[i]){
+    decision[i] = 1
+    buy_value[i] = sampleData$actual_open[i] }
+  else{
+    decision[i] = 0
+  buy_value[i] = 0}
+
+}
+
+
+```
+## Using the above buy signals triggered for the day the below code then sells only if we have bought and trace and calculate the buy trade and sell trade on the test data using capital £10000
+
+```{r}
+ 
+sampleData <- cbind(sampleData, decision, buy_value)
+
+# iterate through df and note buy and sell
+# only sell if we have bought and vice-versa
+
+buy <- c()
+sell <- c()
+share_buy <- c()
+share_sell <- c()
+buyTrades = 1
+sellTrades = 1
+capital = 10000
+shares = 0
+capital_trade_buy <- c()
+capital_trade_sell <- c()
+captr = 1
+
+buyOK <- TRUE
+
+
+for(i in 2:nrow(sampleData)){
+  if ((sampleData$decision[i] == 1) & buyOK ){
+    shares = floor(capital / sampleData$buy_value[i])
+    buy[buyTrades] = shares * sampleData$buy_value[i]
+    share_buy[buyTrades] = shares
+    capital = capital - buy[buyTrades]
+    capital_trade_buy[captr] = capital
+    buyTrades = buyTrades + 1
+    captr = captr + 1
+    buyOK <- FALSE}
+  if (!buyOK){ 
+    sell_val_final <- max(sampleData$actual_close[i-1], 
+                          sampleData$predicted_high[i], 
+                          sampleData$predicted_close[i])
+    sell[sellTrades] = floor(shares * sell_val_final)
+    share_sell[sellTrades] <- shares
+    capital = capital + sell[sellTrades]
+    capital_trade_sell[captr] = capital
+    sellTrades = sellTrades + 1
+    captr = captr + 1
+    buyOK <- TRUE
+    }
+
+}
+
+
+
+```
+
+
+```{r}
+
+buy_pf<- c()
+for (i in 1:length(buy))
+{
+  buy_pf[i] <- round(((buy[i-1] - buy[i])/buy[i])* -1 * 100, 2)
+}
+df <- as.data.frame(cbind(buy,buy_pf))
+#mean(buy_pf[2:6])
+
+
+#capital
+#shares
+#sell
+#share_buy
+#share_sell
+
+
+```
+# Possibility of stop loss
+In order to mitigate the risk of losses, an additional sell condition can be incorporated into the gap fill algorithm by setting a stop-loss order. This involves determining the projected profit and dividing it by three to create a range.(Risk Reward Ratio 3:1) ,If the asset's price falls below this range, the asset is sold. This ensures that potential losses are limited as profits are already restricted. Other technical indicators such as the average true range (ATR) can also be employed to better understand the expected level of volatility on a given day.
+
+
+
+
+# Profit and loss
+
+## Average Profit per trade – 2.67%
+## Cummilative Profit for the Year – 14.58%
+## No of Trading days - 294
+## No of Days Traded - 41
+## No of Trades Taken - 41
+
+
+# Limitations 
+
+
+using daily data, which may not be optimal for identifying intraday trends or capturing subtle market changes that occur within a day. While incorporating real-time data could potentially improve the model's performance, it may also increase computational complexity and introduce new challenges related to data quality, reliability, and processing.
+Secondly, the model only predicts gap-filling opportunities when the gap is down. This may limit the number of trading opportunities and potentially result in missed profit potential from upward gaps. Incorporating the capability to identify and trade upward gaps could enhance the model's effectiveness and provide additional opportunities for profit.
+Finally, it should be noted that the gap filling trading strategy may not perform well in all market conditions. During periods of high volatility or market uncertainty, the model may not be able to accurately predict gap-filling opportunities, potentially resulting in missed trades or losses. Additionally, like all trading strategies, the gap filling strategy carries inherent risks, and implementing basic trading hygiene practices such as using stop-loss orders is essential to mitigating potential losses.
+
+
+# Possible additions 
+
+The Relative Strength Index (RSI) and Moving Average Convergence Divergence (MACD) are important technical indicators used to identify changes in market momentum. However, to enhance the accuracy of the model, the incorporation of additional metrics such as the Fear and Greed Index or sentimental analysis could be advantageous. This is because gap-down scenarios can also indicate the beginning of a bearish trend, such as the COVID-19 pandemic or the Russia-Ukraine War. In such cases, incorporating additional indicators could enable the model to identify potential shorting opportunities and maximize profit. It is essential to maintain basic trading hygiene, including the use of stop-loss orders, even in algorithmic trading practices, to limit potential losses. Overall, incorporating a range of technical indicators and maintaining trading discipline is critical to achieving optimal results in algorithmic trading.
+
+
+```{r , echo=FALSE}
+library(knitr)
+
+knitr::include_graphics("C:/Users/charmaine/OneDrive/Desktop/Uni/ECFF CS971/Assign/GAP FILL CHART.png")
+
+```
+
+
+# Backtesting
+
+
+The provided code is an implementation of a simple backtesting strategy for the stock of a particular company. It retrieves historical stock data from Yahoo Finance using the getSymbols function and performs a technical analysis to identify potential buy or sell signals. It then simulates a trading scenario, where it buys shares when a buy signal is detected and sells them when a sell signal is detected, keeping track of capital and number of trades made. The code also calculates the return on investment (ROI) of the backtesting strategy. This type of simulation can be useful to assess the effectiveness of a particular trading strategy before committing real money to it.
+
+
+
+
+
+```{r}
+#### Backtesting
+library(quantmod)
+library(dplyr)
+library(TTR)
+library(neuralnet)
+library(xts)
+set.seed('101')
+backtst_ticker <- "AAPL"
+backtst_start <- as.Date("2021-01-01")
+backtst_end <- as.Date("2022-12-31")
+
+
+backtst_data <- getSymbols(Symbols = backtst_ticker, src = "yahoo",
+                           from = backtst_start, to = backtst_end, period = "daily")
+backtst_data_xts <- xts(AAPL, order.by = index(AAPL))
+#chartSeries(backtst_data_xts, type="candlesticks")
+backtst_gdatfr <- data.frame(date=index(AAPL), coredata(AAPL)) 
+
+
+actual_close <- backtst_gdatfr$AAPL.Close
+predicted_close <- lag(backtst_gdatfr$AAPL.Close)
+actual_high <- backtst_gdatfr$AAPL.High
+predicted_high <- lag(backtst_gdatfr$AAPL.High)
+actual_low <- backtst_gdatfr$AAPL.Low
+predicted_low <- lag(backtst_gdatfr$AAPL.Low)
+actual_open <- backtst_gdatfr$AAPL.Open
+predicted_open <- lag(backtst_gdatfr$AAPL.Open)
+
+
+sampleData <- data.frame(actual_close,predicted_close,actual_high,
+                         predicted_high,actual_low,predicted_low,
+                         actual_open,predicted_open)
+
+decision <- c( )
+buy_value <-c()
+
+#chartSeries(backtst_gdatfr, type="candlesticks")
+
+for(i in 2:nrow(sampleData)){
+  if (sampleData$predicted_open[i] < sampleData$actual_close[i - 1] &&
+      sampleData$predicted_low[i] < sampleData$predicted_open[i] &&
+      sampleData$predicted_high[i] > sampleData$actual_close[i - 1] &&
+      sampleData$predicted_open[i] > sampleData$actual_open[i]){
+    decision[i] = 1
+    buy_value[i] = sampleData$actual_open[i] }
+  else{
+    decision[i] = 0
+    buy_value[i] = 0}
+  
+}
+
+
+
+sampleData <- cbind(sampleData, decision, buy_value)
+
+# iterate through df and note buy and sell
+# only sell if we have bought and vice-versa
+
+buy <- c()
+sell <- c()
+share_buy <- c()
+share_sell <- c()
+buyTrades = 1
+sellTrades = 1
+capital = 10000
+shares = 0
+capital_trade_buy <- c()
+capital_trade_sell <- c()
+captr = 1
+
+buyOK <- TRUE
+
+
+for(i in 2:nrow(sampleData)){
+  if ((sampleData$decision[i] == 1) & buyOK ){
+    shares = floor(capital / sampleData$buy_value[i])
+    buy[buyTrades] = shares * sampleData$buy_value[i]
+    share_buy[buyTrades] = shares
+    capital = capital - buy[buyTrades]
+    capital_trade_buy[captr] = capital
+    buyTrades = buyTrades + 1
+    captr = captr + 1
+    buyOK <- FALSE}
+  if (!buyOK){ 
+    sell_val_final <- max(sampleData$actual_close[i-1], 
+                          sampleData$predicted_high[i], 
+                          sampleData$predicted_close[i])
+    sell[sellTrades] = floor(shares * sell_val_final)
+    share_sell[sellTrades] <- shares
+    capital = capital + sell[sellTrades]
+    capital_trade_sell[captr] = capital
+    sellTrades = sellTrades + 1
+    captr = captr + 1
+    buyOK <- TRUE
+  }
+  
+}
+
+buy_pf<- c()
+for (i in 1:length(buy))
+{
+  buy_pf[i] <- round(((buy[i-1] - buy[i])/buy[i])* -1 * 100, 2)
+}
+df2 <- as.data.frame(cbind(buy,buy_pf))
+df2
+mean(buy_pf[2:6])
+capital
+```
+
+
+# Bibliography
+
+[1] Treleaven, P., Galas, M., & Lalchand, V. (2013). Algorithmic Trading Review. Communications of the ACM, 56(11), 76-85. doi: 10.1145/2500117
+
+[2]Utilizing artificial neural networks and genetic algorithms to build an algo-trading model for intra-day foreign exchange speculation - https://doi.org/10.1016/j.mcm.2013.02.002
+
+[3] Rajabioun, R. and Rahimi-Kian, A. (2017). A Genetic Programming Based Stock Price Predictor together with Mean-Variance Based Sell/Buy Actions. Expert Systems with Applications, 68, pp. 131-142
+
+[4] https://towardsdatascience.com/is-it-possible-to-predict-stock-prices-with-a-neural-network-d750af3de50b [5] https://www.investopedia.com/articles/trading/05/playinggaps.asp
+
+[6] https://www.r-bloggers.com/2015/09/fitting-a-neural-network-in-r-neuralnet-package/
+
+
+
+
+
+
+
+
