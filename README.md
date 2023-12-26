@@ -1,1 +1,1 @@
-# MScDataScience
+# DataScience
